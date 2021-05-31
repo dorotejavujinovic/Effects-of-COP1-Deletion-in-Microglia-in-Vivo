@@ -1,0 +1,927 @@
+---
+title: "Effects of COP1 Deletion in Microglia in Vivo"
+author: "Doroteja Vujinovic & Tanya Deniz Toluay"
+date: "3/20/2021"
+output:
+  html_document:
+    theme: lumen
+    code_folding: hide
+    toc: true
+    toc_float: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Summary of the Experimental Data
+
+Scientists have been studying the involvement of dysregulated microglia in Alzheimer’s disease pathogenesis for the last decade. But the precise mechanisms controlling pathogenic programs of microglia gene expression is very complex and hard to understand. 
+
+
+Scientists know that the transcription factor (TF) c/EBPß is highly expressed in microglia and is known to regulate the expression of pro-inflammatory genes. It is known that in Alzheimer’s disease, c/EBPß is upregulated. It is unclear how TF are tightly regulated because the alterations in its levels are not reflected in the transcript. So the scientists concluded that TF is primarily regulated post-translationally.
+
+
+In this [data](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE145445), scientists want to show that the ubiquitin ligase Cop1 functions as a “brake” on microglial activation. It achieves this by targeting C/EBPß for ubiquitination and subsequent proteasomal mediated degradation. When Cop1 is absent, C/EBPß protein accumulates. It leads to the engagement of a potent pro-inflammatory and ApoE gene-expression program. As evidence, neurotoxicity in microglia-neuronal co-cultures increases.  
+
+
+Antibody blocking studies revealed that the neurotoxicity was almost entirely attributable to complement. Unexpectedly, the loss of a single allele of C/EBPß rescued the pro-inflammatory phenotype underscoring a significant gene dosage effect. They also found that Cop1 deletion accelerated a mouse model of tau-mediated neurodegeneration where elevated ApoE plays a deleterious role. These results identify c/EBPß as a potential therapeutic target for inflammation-driven neurodegeneration.
+
+
+
+# Dataset
+
+```{r include=FALSE}
+pkgs<-c("DESeq2","SummarizedExperiment","GEOquery","biomaRt","tidyverse","stringr","pheatmap","RColorBrewer")
+invisible(sapply(pkgs,library, character.only = TRUE))
+library(ggnewscale)
+library(reshape2)
+library(pathview)
+```
+
+
+
+```{r results='hide', comment=NA, message=FALSE}
+
+# Importing the Dataset
+GEOid<-"GSE145445" 
+getGEOSuppFiles(GEOid)
+files<-list.files(GEOid,full.names = TRUE); 
+untar(files[[1]],list = T)
+untar(files[[1]],exdir=GEOid)
+files<-list.files(GEOid,full.names = TRUE); 
+gse2<-getGEO(GEOid,GSEMatrix =TRUE)[[1]]
+se2= as(gse2, "SummarizedExperiment")
+metadata(se2)[[1]]
+
+# Reading the Files
+issplit<-map(files, str_split, pattern="\\.", n=2)
+unique(sapply(issplit,function(x){x[[1]][[2]]}))
+tsvfiles <- list.files(path=GEOid, pattern = '.gz$', ignore.case = TRUE, full.names = TRUE)
+tsvlist <- map(tsvfiles, read.table, sep = "\t", header=TRUE)
+names(tsvlist)<-tsvfiles
+tsvlist%>%map(head,n=10)
+
+# Creating a Single Dataframe
+tsvlist%>%map(function(x){x[,"count"]})->listofcols
+listofcols%>%map(head, n=3)
+df2<-as.data.frame(listofcols)
+df2%>%head
+colnames(df2)<-colData(se2)[[1]]
+rownames(df2)<-tsvlist[[1]][,1]
+df2%>%head()
+rownames(se2@colData)<-colnames(df2)
+
+# Our Groups
+se2@colData$characteristics_ch1.2 
+se2@colData$characteristics_ch1.2<-factor(str_replace_all(se2@colData$characteristics_ch1.2, "[^A-Za-z0-9_]", "."))
+
+## Creating a Big Dataset
+dds2fresh <- DESeqDataSetFromMatrix(countData = df2,
+                                    colData = se2@colData,
+                                    design = ~ characteristics_ch1.2)
+
+```
+
+
+We can see that in our raw dataset, we have eight different groups with unique values. In order to analyse the dataset for our project, we will need to transform them. We have two options to transform our dataset; the variance stabilizing transformation (VST) and the rlog.
+
+
+```{r message=FALSE}
+knitr::kable(df2%>%head)
+```
+ 
+
+
+## Transformation
+
+The VST is much faster to compute and is less sensitive to high count outliers than the rlog. The rlog tends to work well on small datasets (n < 30), potentially outperforming the VST when there is a wide range of sequencing depth across samples (an order of magnitude difference). 
+
+Before filtering the number of rows in the dataset:
+```{r comment=NA, message=FALSE}
+dds <- dds2fresh
+nrow(dds)
+```
+
+After the filtering:
+```{r comment=NA, message=FALSE}
+keep <- rowSums(counts(dds)) > 1
+dds <- dds[keep,]
+nrow(dds)
+```
+
+
+### VST
+
+```{r comment=NA, message=FALSE}
+vsd <- vst(dds, blind = FALSE)
+knitr::kable(head(assay(vsd), 3))
+```
+
+
+
+### Rlog
+
+
+```{r comment=NA, message=FALSE}
+rld <- rlog(dds, blind = FALSE)
+knitr::kable(head(assay(rld), 3))
+```
+
+
+
+
+### Visualization of the Transformation
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+
+To show the effect of the transformation, in the figure on the right, we plot the first sample against the second, first simply using the log2 function (after adding 1, to avoid taking the log of zero), and then using the VST and rlog-transformed values. For the log2 approach, we need to first estimate size factors to account for sequencing depth, and then specify the function as normalized. Sequencing depth correction is done automatically for the vst and rlog.
+
+
+We use the log2 transform of normalized counts (left), the VST (middle), and the rlog (right). While the rlog is on roughly the same scale as the log2 counts, the VST has a upward shift for the smaller values. It is the differences between samples (deviation from y=x in these scatterplots) which will contribute to the distance calculations and the PCA plot.
+
+
+We can see how genes with low counts (bottom left-hand corner) seem to be excessively variable on the ordinary logarithmic scale, while the VST and rlog compress differences for the low count genes for which the data provide little information about differential expression.
+
+
+:::
+
+:::{.column width="50%"}
+
+```{r comment=NA, message=FALSE}
+dds2 <- estimateSizeFactors(dds)
+df <- bind_rows(
+  as.data.frame(log2(counts(dds2, normalized=TRUE)[, 1:2]+1)) %>%
+    mutate(transformation = "log2(x + 1)"),
+  as.data.frame(assay(vsd)[, 1:2]) %>% mutate(transformation = "vst"),
+  as.data.frame(assay(rld)[, 1:2]) %>% mutate(transformation = "rlog"))
+colnames(df)[1:2] <- c("x", "y")  
+lvls <- c("log2(x + 1)", "vst", "rlog")
+df$transformation <- factor(df$transformation, levels=lvls)
+ggplot(df, aes(x = x, y = y)) + geom_hex(bins = 80) +
+  coord_fixed() + facet_grid( . ~ transformation) + ggtitle("Effects of Transformation")
+```
+
+:::
+
+::::
+
+
+
+
+## Sample Distancing
+
+A useful first step in an RNA-seq analysis is often to assess the overall similarity between samples. We calculated the Euclidean distance between our samples. We use the data from VST transformation to ensure we have a roughly equal contribution from all genes. Heatmap is a great way to visualise the sample distancing, as it can be seen in the figure on the left.
+
+
+Another way to visualize sample-to-sample distances is a principal components analysis (PCA). In this ordination method, the data points are projected onto the 2D plane such that they spread out in the two directions that explain most of the differences. The x-axis is the direction that separates the data points the most. The values of the samples in this direction are written PC1. The y-axis is a direction (it must be orthogonal to the first direction) that separates the data the second most. The values of the samples in this direction are written PC2. The percent of the total variance that is contained in the direction is printed in the axis label. Note that these percentages do not add to 100%, because more dimensions contain the remaining variance, although each of these remaining dimensions will explain less than the two that we see.
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+
+```{r comment=NA, message=FALSE}
+sampleDists <- dist(t(assay(vsd)))
+
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <-  paste( vsd$genotype.ch1,vsd$characteristics_ch1.1, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette( rev(brewer.pal(9, "BuPu")) )(255)
+
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors, main = "Euclidean Distance Between Samples")
+```
+
+
+:::
+
+:::{.column width="50%"}
+
+
+### Heatmap
+
+
+We can see in the heatmap provided on the right that there is a behaviour of grouping between the two groups that represent the "WT-primary tissue from the brain" and the "LoxP-primary tissue from the brain".
+
+The distance between the group members is way lower than the distance we see between the two groups. Therefore, we observe four little squares by colouring. 
+
+Lighter colour squares indicating the high distance between different groups and the purple colour squares indicating the low distance between the members belong to the same group.
+
+
+:::
+
+::::
+
+
+
+Another plot, very similar to the PCA plot, can be made using the multidimensional scaling (MDS) function in base R. Multidimensional scaling (MDS) is a means of visualizing the level of similarity of individual cases of a dataset. 
+
+MDS is used to translate "information about the pairwise 'distances' among a set of n objects or individuals" into a configuration of n points mapped into an abstract Cartesian space.MDS refers to a set of related ordination techniques used in information visualization, in particular, to display the information contained in a distance matrix. It is a form of non-linear dimensionality reduction.
+
+This is useful when we don’t have a matrix of data, but only a matrix of distances. Here we compute the MDS for the distances calculated from the VST data and plot these in the figure on the left.
+
+We can still see the grouping pattern as in the heatmap, in both PCA and MDS plots. Two groups are clustering on the opposite sides of the x-axis. The pink colour is used for representing the group LoxP, and the blue colour is used for WT.
+
+
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+### PCA Plot
+
+```{r comment=NA, message=FALSE}
+plotPCA(vsd, intgroup = c("genotype.ch1","characteristics_ch1.1"))
+```
+
+:::
+
+:::{.column width="50%"}
+
+### MDS Plot
+
+```{r comment=NA, message=FALSE}
+mds <- as.data.frame(colData(vsd))  %>%
+  cbind(cmdscale(sampleDistMatrix))
+ggplot(mds, aes(x = `1`, y = `2`, color = genotype.ch1, shape = characteristics_ch1.1)) +
+  geom_point(size = 3) + coord_fixed() + ggtitle("Multidimensional Scaling with VST data")
+```
+
+:::
+
+::::
+
+
+# Differential Expression Analysis
+
+## Results Table
+
+### Summary of the Results
+
+```{r comment=NA, message=FALSE}
+dds <- DESeq(dds)
+res <- results(dds)
+res<-results(dds, contrast=c("characteristics_ch1.2", "genotype..WT", "genotype..LoxP..Cop1.KO.microglia."))
+#mcols(res, use.names = TRUE)
+summary(res)
+```
+
+
+### Filtering the Results
+
+Using R functions, we can lower the false discovery rate threshold. If we use the threshold as 0.05, the results can be seen as in the table on the left. 
+
+If we want to raise the log2 fold change threshold, so that we test for genes that show more substantial changes due to treatment, we simply supply a value on the log2 scale. For example, by specifying lfcThreshold = 1, we test for genes that show significant effects of treatment on gene counts more than doubling or less than halving. The results can be seen on the table on the right.
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+#### Threshold as 0.05
+
+```{r comment=NA, message=FALSE}
+res.05 <- results(dds, alpha = 0.05)
+knitr::kable(table(res.05$padj < 0.05))
+```
+
+
+:::
+
+:::{.column width="50%"}
+
+#### Log2 Fold Change Threshold
+
+```{r comment=NA, message=FALSE}
+resLFC1 <- results(dds, lfcThreshold=1)
+knitr::kable(table(resLFC1$padj < 0.1))
+```
+
+:::
+
+::::
+
+
+
+
+
+## Multiple Testing
+
+In high-throughput biology, we are careful to not use the p values directly as evidence against the null, but to correct for multiple testing. There are `r sum(res$pvalue < 0.05, na.rm=TRUE)` genes with a p value below 0.05 among the `r sum(!is.na(res$pvalue))` genes for which the test succeeded in reporting a p value.
+
+If we consider a fraction of 10% false positives acceptable, we can consider all genes with an adjusted p value below 10% = 0.1 as significant: `r sum(res$padj < 0.1, na.rm=TRUE)`
+
+We subset the results table to these genes and then sort it by the log2 fold change estimate to get the significant genes with the strongest down-regulation:
+
+```{r comment=NA, message=FALSE}
+resSig <- subset(res, padj < 0.1)
+knitr::kable(head(resSig[ order(resSig$log2FoldChange), ]))
+```
+
+…and with the strongest up-regulation:
+
+```{r comment=NA, message=FALSE}
+knitr::kable(head(resSig[ order(resSig$log2FoldChange, decreasing = TRUE), ]))
+```
+
+
+# Plot Results
+
+## Counts Plot
+
+A quick way to visualize the counts for a particular gene is to use the plotCounts function in R.
+
+```{r comment=NA, message=FALSE}
+topGene <- rownames(res)[which.min(res$padj)]
+plotCounts(dds, gene = topGene, intgroup=c("characteristics_ch1.2"))
+```
+
+## MA-plot
+
+An MA-plot provides a useful overview for the distribution of the estimated coefficients in the model, e.g. the comparisons of interest, across all genes. On the y-axis, the “M” stands for “minus” – subtraction of log values is equivalent to the log of the ratio – and on the x-axis, the “A” stands for “average”. You may hear this plot also referred to as a mean-difference plot, or a Bland-Altman plot.
+
+We wanted to shrink the noisy log2 fold changes and how this difference effects the data, so we applied statistical moderation. Therefore we included two different plots; with statistical moderation and without statistical moderation. We can also detect the individual points in our graph.
+
+The grey dots represent non significant genes for our dataset. We can see how different our samples are in terms of read counts. The data points converge to zero at Y-axis because log (A/A) is zero. 
+
+
+Another useful diagnostic plot is the histogram of the p values. This plot is best formed by excluding genes with very small counts, which otherwise generate spikes in the histogram.
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+
+### With Statistical Moderation
+
+
+```{r comment=NA, message=FALSE}
+library("apeglm")
+#resultsNames(dds)
+res <- lfcShrink(dds, coef="characteristics_ch1.2_genotype..WT_vs_genotype..LoxP..Cop1.KO.microglia.", type="apeglm")
+plotMA(res, ylim = c(-5, 5))
+```
+
+
+### MA Plot With Labeling Individual Points
+
+```{r comment=NA, message=FALSE}
+plotMA(res, ylim = c(-5,5))
+topGene <- rownames(res)[which.min(res$padj)]
+with(res[topGene, ], {
+  points(baseMean, log2FoldChange, col="dodgerblue", cex=2, lwd=2)
+  text(baseMean, log2FoldChange, topGene, pos=2, col="dodgerblue")
+})
+```
+
+
+:::
+
+:::{.column width="50%"}
+
+### Without Statistical Moderation
+
+
+```{r comment=NA, message=FALSE}
+res.noshr <- results(dds, name="characteristics_ch1.2_genotype..WT_vs_genotype..LoxP..Cop1.KO.microglia.")
+plotMA(res.noshr, ylim = c(-5, 5))
+```
+
+
+
+### Histogram
+
+
+```{r comment=NA, message=FALSE}
+hist(res$pvalue[res$baseMean > 1], breaks = 0:20/20,
+     col = "grey", border = "white", main= "Histogram of Frequency", xlab = "Base mean > 1")
+```
+
+
+:::
+
+::::
+
+
+
+## Gene Clustering
+
+In order to understand the gene clustering better we can look at the involved genes in the map and which role they take in the body. In the heatmap, we can see the topmost statistically significant 20 genes for our dataset. Sadly, we could not find any genes related to neurodegeneration association. Although, we found that one of these genes was already associated with Alzheimer's disease and one gene was associated with the immune response to pathogens. The genes with proven associations that are shown in the heatmap are given in the table below. You can click on the numbers to directly go to the NCBI page of the genes for further information.
+
++[11816](https://www.ncbi.nlm.nih.gov/gene/11816) Apoe apolipoprotein E: involved in the transport of lipoproteins in the blood. Different alleles of this gene have been associated with either increased risk or a protective effect for Alzheimer's disease in human patients.  
+
++[13058](https://www.ncbi.nlm.nih.gov/gene/13058) Cytochrome b-245, beta polypeptide: encodes the heavy chain component of a heterodimeric transmembrane ion transporter composed of both a heavy and a light chain. This transporter mediates the transfer of electrons from nicotinamide adenine dinucleotide phosphate (NADPH) to oxygen to generate superoxide. This reaction is important in the innate immune response to pathogens.
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="60%"}
+
+
+```{r comment=NA, message=FALSE}
+library("genefilter")
+topVarGenes <- head(order(rowVars(assay(vsd)), decreasing = TRUE), 20)
+
+mat  <- assay(vsd)[ topVarGenes, ]
+mat  <- mat - rowMeans(mat)
+anno <- as.data.frame(colData(vsd)[, c("characteristics_ch1.1","genotype.ch1")])
+pheatmap(mat, annotation_col = anno)
+```
+
+
+
+:::
+
+:::{.column width="40%"}
+
+In the sample distance heatmap made previously, the dendrogram at the side shows us a hierarchical clustering of the samples. Such clustering can also be performed for the genes. Since the clustering is only relevant for genes that carry a signal, one usually would only cluster a subset of the most highly variable genes.
+
+
+The heatmap becomes more interesting if we do not look at absolute expression strength but rather at the amount by which each gene deviates in a specific sample from the gene’s average across all samples. Hence, we center each genes’ values across samples and plot a heatmap.
+
+:::
+
+::::
+
+# Annotating results
+
+Our result table so far only contains the Ensembl gene IDs, but alternative gene names may be more informative for interpretation. Bioconductor’s annotation packages help with mapping various ID schemes to each other. We load the [AnnotationDbi](https://bioconductor.org/packages/3.12/bioc/html/AnnotationDbi.html) package and the annotation package [org.Mm.eg.db](https://bioconductor.org/packages/3.12/data/annotation/html/org.Mm.eg.db.html):
+
+```{r include=FALSE}
+library("AnnotationDbi")
+library("org.Mm.eg.db")
+library("EnhancedVolcano")
+```
+
+This is the organism annotation package (“org”) for Mus muculus (“Mm”), organized as an AnnotationDbi database package (“db”), using Entrez Gene IDs (“eg”) as primary key. We can see all the available key types in this database:
+
+```{r comment=NA, message=FALSE}
+columns(org.Mm.eg.db)
+```
+
+We used the the mapIds function to add individual columns to our results table in order to add the information we want.This way we added the desired external gene IDs to our result.
+
+```{r comment=NA, message=FALSE}
+ens.str <- substr(rownames(res), 1, 15)
+res$symbol <- mapIds(org.Mm.eg.db,
+                     keys=ens.str,
+                     column="SYMBOL",
+                     keytype="ENTREZID",
+                     multiVals="first")
+
+
+resOrdered <- res[order(res$pvalue),]
+knitr::kable(head(resOrdered))
+
+
+dfannotation2<-mapIds(x=org.Mm.eg.db,
+                      keys = rownames(counts(dds)),
+                      column = "SYMBOL",
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+
+ 
+duplicates<-dfannotation2[duplicated(dfannotation2)]
+
+```
+
+
+
+
+
+```{r comment=NA, message=FALSE}
+
+#  Volcano plot
+df2<-as.data.frame(counts(dds))
+colData<-colData(dds)
+metadata<-metadata(dds)
+database<-org.Mm.eg.db
+
+
+#rownames(df2)%>%head
+symbols <- select(database, keys = rownames(df2),
+                  column = c("SYMBOL"), keytype = "ENTREZID")
+
+df2%>%mutate(RowNames=rownames(.))%>%right_join(symbols,by=c("RowNames"="ENTREZID"))%>%filter(!is.na(SYMBOL))->dfjoined
+knitr::kable(dfjoined%>%head)
+```
+
+
+
+
+## Volcano Plot
+
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+
+
+
+Volcano Plot is great for to identify changes in large data sets composed of replicate data. It combines a measure of statistical significance from a statistical test with the magnitude of the change, enabling quick visual identification of those data-points like genes. This way we can plot significance versus fold-change on the y and x axes, respectively.
+
+
+
+
+:::
+
+:::{.column width="50%"}
+
+
+
+```{r comment=NA, message=FALSE}
+
+dfjoined%>%select_if(is.numeric)->dfannotated
+rownames(dfannotated)<-dfjoined[,"SYMBOL"]
+
+
+dds <- DESeq(dds, betaPrior=FALSE)
+
+dds$characteristics_ch1 <- as.factor(dds$characteristics_ch1)
+dds$characteristics_ch1.1 <- as.factor(dds$characteristics_ch1.1)
+dds$characteristics_ch1.2 <- as.factor(dds$characteristics_ch1.2)
+
+
+
+EnhancedVolcano(res,
+                lab = rownames(res),
+                x = 'log2FoldChange',
+                y = 'pvalue')
+
+```
+
+
+:::
+
+::::
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+## Bar Plot of Expressed Characteristics
+
+Bar plot is the most widely used method to visualize enriched terms. It depicts the enrichment scores and gene count or ratio as bar height and color.
+
+```{r comment=NA, message=FALSE, warning=FALSE}
+pkgs<-c("DESeq2","SummarizedExperiment","GEOquery","biomaRt","tidyverse","stringr","pheatmap","RColorBrewer","hexbin","clusterProfiler","org.Hs.eg.db","org.Mm.eg.db")
+invisible(sapply(pkgs,library, character.only = TRUE))
+
+
+
+res<-res[!is.na(res$padj),]
+SigExpGenes<-res[(res$padj < 0.05) & (abs(res$log2FoldChange)>1),] 
+
+
+ggo1 <- groupGO(gene     = rownames(SigExpGenes),
+                OrgDb    = org.Mm.eg.db,
+                keyType = "ENTREZID",
+                ont      = "BP",
+                level    = 1,
+                readable = F)
+
+
+ggo2 <- groupGO(gene     = rownames(SigExpGenes),
+                                 OrgDb    = org.Mm.eg.db,
+                                 keyType = "ENTREZID",
+                                 ont      = "BP",
+                                  level    = 2,
+                                 readable = F)
+
+
+
+ego <- enrichGO(gene          = rownames(SigExpGenes),
+                universe      = rownames(counts(dds)),
+                OrgDb         = org.Mm.eg.db,
+                keyType       = 'ENTREZID',
+                ont           = "BP",
+                pAdjustMethod = "BH",
+                pvalueCutoff  = 0.05,
+                qvalueCutoff  = 0.05,
+                readable      = F)
+dfego<-as.data.frame(ego[,-8])
+
+
+barplot(ego, showCategory = 20)
+
+```
+
+
+
+:::
+
+:::{.column width="50%"}
+
+## Gene Concept Network Plot 
+
+The barplot only displayed most significant enriched terms, while users may want to know which genes are involved in these significant terms. The cnetplot depicts the linkages of genes and biological concepts as a network.
+
+```{r comment=NA, message=FALSE, warning=FALSE}
+cnetplot(ego, categorySize = "pvalue", foldChange = rownames(SigExpGenes))
+```
+
+:::
+
+::::
+
+
+
+# Gene Enrichment Analysis
+
+
+## Significantly Expressed Genes
+
+We can create a dataset of significantly expressed genes in order to understand the data better. It is important to understand which genes are expressed because the gene expression is the process by which the information encoded in a gene is used to direct the assembly of a protein molecule. 
+
+```{r comment=NA, message=FALSE, warning=FALSE}
+SigExpGenes$ENTREZID<-AnnotationDbi::mapIds(x=database,
+                       keys = rownames(SigExpGenes),
+                       column = "SYMBOL",
+                       keytype = "ENTREZID",
+                       multiVals = "first")
+knitr::kable(head(SigExpGenes))
+
+kk <- enrichKEGG(gene         = rownames(SigExpGenes),
+                 organism     = 'mmu',
+                 pAdjustMethod = "BH",
+                 qvalueCutoff = 0.2,
+                 pvalueCutoff = 0.05)
+kkres<-as.data.frame(kk@result)
+#knitr::kable(head(kkres))
+```
+
+We can also see the associated pathways for our dataset and the small description about them. As expected, since the transcription factor (TF) c/EBPß is highly expressed in microglia and is known to regulate the expression of pro-inflammatory genes, we can see a lot of other disease related pathways as well.
+
+
+```{r comment=NA, message=FALSE, warning=FALSE}
+
+significantkkres<-kkres[kkres$pvalue<kk@pvalueCutoff & kkres$p.adjust<kk@pvalueCutoff & kkres$qvalue < kk@qvalueCutoff,2,drop=F]
+significantkkres
+
+links<-sapply(rownames(head(kk)),function(x){browseKEGG(kk, x)})
+
+GEOID<-"GSE145445"
+setwd(GEOid)
+geneList<-SigExpGenes$log2FoldChange
+names(geneList)<-rownames(SigExpGenes)
+```
+
+
+## KEGG Pathways
+
+[ClusterProfiler](https://bioconductor.org/packages/release/bioc/html/clusterProfiler.html) users can also use pathview from the pathview to visualize KEGG pathway.
+
+The following example illustrates how to visualize the "mmu04514" pathway, which was enriched in our previous analysis.
+
+We can see the significantly expressed genes represented by their colours on the pathway map.   
+
+```{r comment=NA, message=FALSE, warning=FALSE}
+mmu04514 <- pathview(gene.data  = geneList,
+                     pathway.id = "mmu04514",
+                     species    = "mmu",
+                     limit      = list(gene=max(abs(geneList)), cpd=1))
+
+```
+![](mmu04514.pathview.png)
+
+The tables of Ensembl data is downloadable with the BioMart data-mining tool so we are using BioMart to extract the data we need. 
+
+The used datasets can be seen on the table given, with the Ensembl version.
+
+```{r comment=NA, message=FALSE, warning=FALSE}
+setwd("..")
+mkk <- enrichMKEGG(gene         = rownames(SigExpGenes),
+                 organism     = 'mmu',
+                 pAdjustMethod = "BH",
+                 qvalueCutoff = 0.2,
+                 pvalueCutoff = 0.05)
+#knitr::kable(head(mkk))
+mkkres<-as.data.frame(mkk@result)
+listMarts()
+```
+
+```{r comment=NA, message=FALSE}
+ensembl <- useMart("ensembl")
+datasets <- listDatasets(ensembl)
+
+datasets[grep("[mM]ouse",datasets$description),]
+ensembl = useDataset("mmusculus_gene_ensembl",mart=ensembl)
+filters = listFilters(ensembl)
+
+annotation1<-AnnotationDbi::select(x=database,
+                      keys = rownames(counts(dds)),
+                      column = c("SYMBOL", "ENTREZID"),
+                      keytype = "ENTREZID",
+                      multiVals = "first")
+
+
+annotation2<-getBM(attributes=c("ensembl_gene_id","description","chromosome_name", 'entrezgene_id',"uniprot_gn_symbol","mgi_symbol"), 
+                   filters = "entrezgene_id", 
+                  values =  annotation1$ENTREZID, 
+                  mart = ensembl)
+
+annotation2$entrezgene_id<-as.character(annotation2$entrezgene_id)
+annotation3<-annotation1%>%inner_join(annotation2,by=c("ENTREZID" = "entrezgene_id"))
+```
+
+
+
+
+
+## Vizualization 
+
+We can see the dataset as given for each group:
+
+```{r comment=NA, message=FALSE}
+knitr::kable(counts(dds)%>%head)
+```
+
+
+Now to create an understandable visualization we can use boxplots per group. First it can be seen on the left, boxplot 1, the plot is created by the boxplot function in R. In order to see any differences for the depth normalization, we also created the boxplot on the right side, for normalized counts.
+
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+
+### Read Counts Only
+
+```{r comment=NA, message=FALSE}
+
+boxplot(counts(dds), main = "read counts only", cex = .6)
+
+```
+
+### Non-normalized
+
+```{r comment=NA, message=FALSE}
+boxplot(log2(counts(dds)+1), notch=TRUE,
+main = "Non-normalized read counts",
+ylab="log2(read counts)", cex = .6)
+```
+
+
+:::
+
+:::{.column width="50%"}
+
+
+### Normalized
+```{r comment=NA, message=FALSE}
+counts.sf_normalized <- counts(dds, normalized=TRUE)
+
+boxplot(counts.sf_normalized, main = "Normalized", cex = .6)
+```
+
+### Normalized
+
+
+```{r comment=NA, message=FALSE}
+
+boxplot(log2(counts(dds, normalize= TRUE) +1), notch=TRUE,
+main = "Size-factor-normalized read counts",
+ylab="log2(read counts)", cex = .6)
+```
+
+
+
+
+:::
+
+::::
+
+
+
+On the left it can be seen the first boxplot, the plot is created by ggplot function. We can see the mean value and the outliers for each group. The plot is based on the assay implementation on our dataset. 
+
+On the right we can see the second boxplot, we are using the vst function in R to implement variance stabilizing transformation in our dataset.
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+
+### VSD Normalization
+```{r comment=NA, message=FALSE}
+df2<-as.data.frame(assay(vsd))
+ggplot(data = melt(df2), aes(x=variable, y=value)) + geom_boxplot(aes(fill=variable))
+```
+
+
+:::
+
+:::{.column width="50%"}
+
+
+### VSD Normalization via VST
+```{r comment=NA, message=FALSE}
+vsd <- vst(dds)
+df2<-as.data.frame(assay(vsd))
+ggplot(data = melt(df2), aes(x=variable, y=value)) + geom_boxplot(aes(fill=variable))
+```
+
+:::
+
+::::
+
+
+
+
+
+
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+
+
+```{r comment=NA, message=FALSE}
+plotDispEsts(dds)
+```
+
+
+
+:::
+
+:::{.column width="50%"}
+
+### Dispersion Plot
+
+We can also use dispersion plot in our data to understand per-gene dispersion estimates together with the fitted mean-dispersion relationship. We can draw the plots by the function plotDispEsts in R.
+
+:::
+
+::::
+
+
+
+
+
+### Rlog Normalization
+
+
+If we use the rlog normalization in our dataset, we can see the effects on the data by creating another boxplot, clustred by the group, LoxP and wild type (WT).
+
+We can see the first entries in our dataset as given below: 
+
+```{r comment=NA, message=FALSE}
+rld <- rlog(dds)
+knitr::kable(assay(rld)%>%head)
+```
+
+
+
+:::: {.columns style="display: flex;"}
+
+::: {.column width="50%"}
+
+
+
+```{r comment=NA, message=FALSE}
+df3<-as.data.frame(assay(vsd))
+ggplot(data = melt(df3), aes(x=variable, y=value)) + geom_boxplot(aes(fill=variable))
+```
+
+
+
+:::
+
+:::{.column width="50%"}
+
+
+### Boxplot with Rlog Normalization
+
+We can see in the boxplot that the data is coloured based on the group cluster. 
+
+The mean values differ between the groups but not by a huge difference, rather by wiggling. 
+
+There are outliers in each group, and the maximum value is similar nearly in all of them by minor differences.
+
+
+:::
+
+::::
+
+
+
+
+
+
+
